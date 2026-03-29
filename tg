@@ -8,6 +8,8 @@ Usage:
   tg chats [n]                   List recent chats (default 20)
   tg search <query>              Search contacts/chats by name
   tg file <chat> <path>          Send a file
+  tg unread                      Show all unread messages
+  tg watch [interval]            Poll for new messages (default 30s)
   tg login                       Login / verify session
 
 Chat can be a display name (partial match), phone number, or @username.
@@ -195,6 +197,62 @@ async def cmd_file(chat_str, file_path):
         await client.disconnect()
 
 
+async def cmd_unread():
+    client = await get_client()
+    from telethon.utils import get_display_name
+    try:
+        total = 0
+        async for dialog in client.iter_dialogs(limit=100):
+            if dialog.unread_count > 0:
+                chat_name = dialog.name or "Unknown"
+                print(f"\n--- {chat_name} ({dialog.unread_count} unread) ---")
+                messages = []
+                async for msg in client.iter_messages(dialog.entity, limit=dialog.unread_count):
+                    messages.append(msg)
+                for msg in reversed(messages):
+                    sender = get_display_name(msg.sender) if msg.sender else ""
+                    time_str = msg.date.strftime("%H:%M")
+                    text = msg.text or "[media]"
+                    print(f"  [{time_str}] {sender}: {text}")
+                total += dialog.unread_count
+        if total == 0:
+            print("No unread messages.")
+        else:
+            print(f"\nTotal: {total} unread")
+    finally:
+        await client.disconnect()
+
+
+async def cmd_watch(interval=30):
+    client = await get_client()
+    from telethon.utils import get_display_name
+    seen = set()
+
+    async for dialog in client.iter_dialogs(limit=100):
+        if dialog.unread_count > 0:
+            async for msg in client.iter_messages(dialog.entity, limit=dialog.unread_count):
+                seen.add(msg.id)
+
+    print(f"Watching for new messages (every {interval}s)... Ctrl+C to stop\n")
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            async for dialog in client.iter_dialogs(limit=100):
+                if dialog.unread_count > 0:
+                    chat_name = dialog.name or "Unknown"
+                    async for msg in client.iter_messages(dialog.entity, limit=dialog.unread_count):
+                        if msg.id not in seen:
+                            seen.add(msg.id)
+                            sender = get_display_name(msg.sender) if msg.sender else ""
+                            time_str = msg.date.strftime("%H:%M")
+                            text = msg.text or "[media]"
+                            print(f"[{time_str}] {chat_name} | {sender}: {text}")
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        await client.disconnect()
+
+
 def main():
     if len(sys.argv) < 2:
         print_usage()
@@ -227,6 +285,11 @@ def main():
             print("Usage: tg file <chat> <path>")
             sys.exit(1)
         asyncio.run(cmd_file(sys.argv[2], sys.argv[3]))
+    elif cmd == "unread":
+        asyncio.run(cmd_unread())
+    elif cmd == "watch":
+        interval = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+        asyncio.run(cmd_watch(interval))
     else:
         print(f"Unknown command: {cmd}")
         print_usage()

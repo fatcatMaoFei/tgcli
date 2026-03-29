@@ -39,6 +39,8 @@ tg file "John" ./photo.jpg
 | `tg chats [n]` | List recent chats (default 20) |
 | `tg search <query>` | Search contacts/chats by name |
 | `tg file <chat> <path>` | Send a file, image, or video |
+| `tg unread` | Show all unread messages |
+| `tg watch [interval]` | Poll for new messages (default 30s) |
 | `tg login` | Login or verify your session |
 
 `<chat>` can be:
