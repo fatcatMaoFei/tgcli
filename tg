@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""
+tg - A dead-simple Telegram CLI.
+
+Usage:
+  tg send <chat> <message>       Send a message to a chat
+  tg read <chat> [n]             Read last n messages (default 10)
+  tg chats [n]                   List recent chats (default 20)
+  tg search <query>              Search contacts/chats by name
+  tg file <chat> <path>          Send a file
+  tg login                       Login / verify session
+
+Chat can be a display name (partial match), phone number, or @username.
+
+Setup:
+  1. Get api_id and api_hash from https://my.telegram.org
+  2. pip install telethon
+  3. Set env vars or create ~/.tg.conf:
+       TG_API_ID=12345
+       TG_API_HASH=abcdef...
+  4. tg login
+"""
+
+import sys
+import os
+import asyncio
+from pathlib import Path
+
+CONFIG_PATH = Path.home() / ".tg.conf"
+SESSION_PATH = str(Path.home() / ".tg_session")
+
+
+def load_config():
+    api_id = os.environ.get("TG_API_ID")
+    api_hash = os.environ.get("TG_API_HASH")
+
+    if not api_id and CONFIG_PATH.exists():
+        for line in CONFIG_PATH.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k, v = k.strip(), v.strip()
+            if k == "TG_API_ID":
+                api_id = v
+            elif k == "TG_API_HASH":
+                api_hash = v
+            elif k == "TG_SESSION":
+                global SESSION_PATH
+                SESSION_PATH = v
+
+    if not api_id or not api_hash:
+        print("Error: TG_API_ID and TG_API_HASH not set.")
+        print(f"Set env vars or create {CONFIG_PATH}:")
+        print("  TG_API_ID=12345")
+        print("  TG_API_HASH=abcdef...")
+        print("\nGet them from https://my.telegram.org")
+        sys.exit(1)
+
+    return int(api_id), api_hash
+
+
+def print_usage():
+    print(__doc__.strip())
+    sys.exit(1)
+
+
+async def get_client():
+    from telethon import TelegramClient
+    api_id, api_hash = load_config()
+    client = TelegramClient(SESSION_PATH, api_id, api_hash)
+    await client.start()
+    return client
+
+
+async def resolve_chat(client, chat_str):
+    from telethon import errors
+
+    if chat_str.startswith("@"):
+        return await client.get_entity(chat_str)
+
+    if chat_str.startswith("+") or chat_str.isdigit():
+        try:
+            return await client.get_entity(chat_str)
+        except (ValueError, errors.UsernameNotOccupiedError):
+            pass
+
+    best = None
+    async for dialog in client.iter_dialogs(limit=200):
+        name = dialog.name or ""
+        if name == chat_str:
+            return dialog.entity
+        if chat_str.lower() in name.lower() and best is None:
+            best = dialog.entity
+
+    if best:
+        return best
+
+    return await client.get_entity(chat_str)
+
+
+async def cmd_login():
+    client = await get_client()
+    me = await client.get_me()
+    print(f"Logged in as: {me.first_name} {me.last_name or ''} (@{me.username or 'N/A'})")
+    print(f"Phone: {me.phone}")
+    await client.disconnect()
+
+
+async def cmd_send(chat_str, message):
+    client = await get_client()
+    try:
+        entity = await resolve_chat(client, chat_str)
+        from telethon.utils import get_display_name
+        name = get_display_name(entity)
+        await client.send_message(entity, message)
+        print(f"Sent to {name}: {message}")
+    finally:
+        await client.disconnect()
+
+
+async def cmd_read(chat_str, n=10):
+    client = await get_client()
+    try:
+        entity = await resolve_chat(client, chat_str)
+        from telethon.utils import get_display_name
+        chat_name = get_display_name(entity)
+        print(f"--- {chat_name} (last {n}) ---\n")
+
+        messages = []
+        async for msg in client.iter_messages(entity, limit=n):
+            messages.append(msg)
+
+        for msg in reversed(messages):
+            sender = ""
+            if msg.sender:
+                sender = get_display_name(msg.sender)
+            time_str = msg.date.strftime("%m-%d %H:%M")
+            text = msg.text or "[media]"
+            print(f"[{time_str}] {sender}: {text}")
+    finally:
+        await client.disconnect()
+
+
+async def cmd_chats(n=20):
+    client = await get_client()
+    try:
+        print("--- Recent chats ---\n")
+        count = 0
+        async for dialog in client.iter_dialogs(limit=n):
+            unread = f" ({dialog.unread_count} unread)" if dialog.unread_count else ""
+            last = ""
+            if dialog.message and dialog.message.text:
+                last = dialog.message.text[:40]
+            elif dialog.message:
+                last = "[media]"
+            print(f"  {dialog.name}{unread}: {last}")
+            count += 1
+        print(f"\nTotal: {count}")
+    finally:
+        await client.disconnect()
+
+
+async def cmd_search(query):
+    client = await get_client()
+    try:
+        print(f"--- Search: {query} ---\n")
+        found = 0
+        async for dialog in client.iter_dialogs(limit=200):
+            name = dialog.name or ""
+            if query.lower() in name.lower():
+                print(f"  {name}")
+                found += 1
+        if not found:
+            print("  No matches found")
+    finally:
+        await client.disconnect()
+
+
+async def cmd_file(chat_str, file_path):
+    client = await get_client()
+    try:
+        entity = await resolve_chat(client, chat_str)
+        from telethon.utils import get_display_name
+        name = get_display_name(entity)
+
+        if not os.path.exists(file_path):
+            print(f"Error: file not found: {file_path}")
+            sys.exit(1)
+
+        print(f"Sending {file_path} to {name}...")
+        await client.send_file(entity, file_path)
+        print("Done.")
+    finally:
+        await client.disconnect()
+
+
+def main():
+    if len(sys.argv) < 2:
+        print_usage()
+
+    cmd = sys.argv[1]
+
+    if cmd == "login":
+        asyncio.run(cmd_login())
+    elif cmd == "send":
+        if len(sys.argv) < 4:
+            print("Usage: tg send <chat> <message>")
+            sys.exit(1)
+        asyncio.run(cmd_send(sys.argv[2], " ".join(sys.argv[3:])))
+    elif cmd == "read":
+        if len(sys.argv) < 3:
+            print("Usage: tg read <chat> [n]")
+            sys.exit(1)
+        n = int(sys.argv[3]) if len(sys.argv) > 3 else 10
+        asyncio.run(cmd_read(sys.argv[2], n))
+    elif cmd == "chats":
+        n = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+        asyncio.run(cmd_chats(n))
+    elif cmd == "search":
+        if len(sys.argv) < 3:
+            print("Usage: tg search <query>")
+            sys.exit(1)
+        asyncio.run(cmd_search(sys.argv[2]))
+    elif cmd == "file":
+        if len(sys.argv) < 4:
+            print("Usage: tg file <chat> <path>")
+            sys.exit(1)
+        asyncio.run(cmd_file(sys.argv[2], sys.argv[3]))
+    else:
+        print(f"Unknown command: {cmd}")
+        print_usage()
+
+
+if __name__ == "__main__":
+    main()

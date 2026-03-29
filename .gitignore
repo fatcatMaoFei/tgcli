@@ -1,0 +1,5 @@
+*.session
+*.session-journal
+.tg.conf
+__pycache__/
+*.pyc
